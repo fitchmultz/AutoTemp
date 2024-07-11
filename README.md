@@ -13,7 +13,6 @@ AutoTemp is a Python tool that enhances language model interactions by intellige
 
 To install AutoTemp, you can simply clone the repository and install the required dependencies.
 
-
     git clone https://github.com/elder-plinius/AutoTemp.git
     cd AutoTemp
     pip install -r requirements.txt
@@ -32,9 +31,7 @@ To use AutoTemp, simply run the autotemp.py script with Python:
 
     python autotemp.py
 
-
 You can pass your prompt directly into the AutoTemp class instance within the script.
-
 
 ## Configuration
 

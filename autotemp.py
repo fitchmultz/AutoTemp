@@ -1,21 +1,30 @@
-import openai
-from dotenv import load_dotenv
 import os
 import re
-from concurrent.futures import ThreadPoolExecutor, as_completed
-import gradio as gr
 import traceback
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+import gradio as gr
+import openai
+from dotenv import load_dotenv
 
 # Load environment variables from .env file
 load_dotenv()
 
+
 class AutoTemp:
-    def __init__(self, default_temp=0.0, alt_temps=None, auto_select=True, max_workers=6, model_version="gpt-3.5-turbo"):
-        self.api_key = os.getenv('OPENAI_API_KEY')
+    def __init__(
+        self,
+        default_temp=0.0,
+        alt_temps=None,
+        auto_select=True,
+        max_workers=6,
+        model_version="gpt-3.5-turbo",
+    ):
+        self.api_key = os.getenv("OPENAI_API_KEY")
         if not self.api_key:
             raise ValueError("OPENAI_API_KEY is not set in the environment variables.")
         openai.api_key = self.api_key
-        
+
         self.default_temp = default_temp
         self.alt_temps = alt_temps if alt_temps else [0.4, 0.6, 0.8, 1.0, 1.2, 1.4]
         self.auto_select = auto_select
@@ -29,21 +38,24 @@ class AutoTemp:
                     model=self.model_version,
                     messages=[
                         {"role": "system", "content": "You are a helpful assistant."},
-                        {"role": "user", "content": prompt}
+                        {"role": "user", "content": prompt},
                     ],
                     temperature=temperature,
-                    top_p=top_p
+                    top_p=top_p,
                 )
                 # Adjusted to use attribute access instead of dictionary access
                 message = response.choices[0].message.content
                 return message.strip()
             except Exception as e:
                 retries -= 1
-                print(f"Attempt failed with error: {e}")  # Print the error for debugging
+                print(
+                    f"Attempt failed with error: {e}"
+                )  # Print the error for debugging
                 if retries <= 0:
-                    print(f"Final error generating text at temperature {temperature} and top-p {top_p}: {e}")
+                    print(
+                        f"Final error generating text at temperature {temperature} and top-p {top_p}: {e}"
+                    )
                     return f"Error generating text at temperature {temperature} and top-p {top_p}: {e}"
-
 
     def evaluate_output(self, output, temperature, top_p):
         fixed_top_p_for_evaluation = 1.0
@@ -63,31 +75,44 @@ class AutoTemp:
             {output}
             ---
             """
-        score_text = self.generate_with_openai(eval_prompt, 0.69, fixed_top_p_for_evaluation)
-        score_match = re.search(r'\b\d+(\.\d)?\b', score_text)
+        score_text = self.generate_with_openai(
+            eval_prompt, 0.69, fixed_top_p_for_evaluation
+        )
+        score_match = re.search(r"\b\d+(\.\d)?\b", score_text)
         if score_match:
-            return round(float(score_match.group()), 1)  # Round the score to one decimal place
+            return round(
+                float(score_match.group()), 1
+            )  # Round the score to one decimal place
         else:
             return 0.0  # Unable to parse score, default to 0.0
 
     def run(self, prompt, temperature_string, top_p):
-        temperature_list = [float(temp.strip()) for temp in temperature_string.split(',')]
+        temperature_list = [
+            float(temp.strip()) for temp in temperature_string.split(",")
+        ]
         outputs = {}
         scores = {}
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
             future_to_temp = {
-                executor.submit(self.generate_with_openai, prompt, temp, top_p): temp for temp in temperature_list
+                executor.submit(self.generate_with_openai, prompt, temp, top_p): temp
+                for temp in temperature_list
             }
             for future in as_completed(future_to_temp):
                 temp = future_to_temp[future]
                 try:
                     output_text = future.result()
-                    print(f"Output for temp {temp}: {output_text}")  # Print the output for debugging
+                    print(
+                        f"Output for temp {temp}: {output_text}"
+                    )  # Print the output for debugging
                     if output_text and not output_text.startswith("Error"):
                         outputs[temp] = output_text
-                        scores[temp] = self.evaluate_output(output_text, temp, top_p)  # Pass top_p here
+                        scores[temp] = self.evaluate_output(
+                            output_text, temp, top_p
+                        )  # Pass top_p here
                 except Exception as e:
-                    print(f"Error while generating or evaluating output for temp {temp}: {e}")
+                    print(
+                        f"Error while generating or evaluating output for temp {temp}: {e}"
+                    )
 
         if not scores:
             return "No valid outputs generated.", None
@@ -101,13 +126,18 @@ class AutoTemp:
             best_temp, best_output, best_score = sorted_outputs[0]
             return f"Best AutoTemp Output (Temp {best_temp} | Top-p {top_p} | Score: {best_score}):\n{best_output}"
         else:
-            return "\n".join(f"Temp {temp} | Top-p {top_p} | Score: {score}:\n{text}" for temp, text, score in sorted_outputs)
+            return "\n".join(
+                f"Temp {temp} | Top-p {top_p} | Score: {score}:\n{text}"
+                for temp, text, score in sorted_outputs
+            )
+
 
 # Gradio app logic
 def run_autotemp(prompt, temperature_string, top_p, auto_select):
     agent = AutoTemp(auto_select=auto_select)
     output = agent.run(prompt, temperature_string, top_p=float(top_p))
     return output
+
 
 # Gradio interface setup
 def main():
@@ -116,8 +146,10 @@ def main():
         inputs=[
             "text",
             "text",
-            gr.Slider(minimum=0.0, maximum=1.0, step=0.1, value=1.0, label="top-p value"),
-            "checkbox"
+            gr.Slider(
+                minimum=0.0, maximum=1.0, step=0.1, value=1.0, label="top-p value"
+            ),
+            "checkbox",
         ],
         outputs="text",
         title="AutoTemp: Enhanced LLM Responses with Temperature and Top-p Tuning",
@@ -154,16 +186,52 @@ Top-p and temperature are both parameters that control the randomness of AI-gene
 
 Adjusting both temperature and top-p helps tailor the AI's output to your specific needs.""",
         examples=[
-            ["Write a short story about AGI learning to love", "0.5, 0.7, 0.9, 1.1", 1.0, False],
-            ["Create a dialogue between a chef and an alien creating an innovative new recipe", "0.3, 0.6, 0.9, 1.2", 0.9, True],
-            ["Explain quantum computing to a 5-year-old", "0.4, 0.8, 1.2, 1.5", 0.8, False],
-            ["Draft an email to a hotel asking for a special arrangement for a marriage proposal", "0.4, 0.7, 1.0, 1.3", 0.7, True],
-            ["Describe a futuristic city powered by renewable energy", "0.5, 0.75, 1.0, 1.25", 0.6, False],
-            ["Generate a poem about the ocean's depths in the style of Edgar Allan Poe", "0.6, 0.8, 1.0, 1.2", 0.5, True],
-            ["What are some innovative startup ideas for improving urban transportation?", "0.45, 0.65, 0.85, 1.05", 0.4, False]
-        ]
+            [
+                "Write a short story about AGI learning to love",
+                "0.5, 0.7, 0.9, 1.1",
+                1.0,
+                False,
+            ],
+            [
+                "Create a dialogue between a chef and an alien creating an innovative new recipe",
+                "0.3, 0.6, 0.9, 1.2",
+                0.9,
+                True,
+            ],
+            [
+                "Explain quantum computing to a 5-year-old",
+                "0.4, 0.8, 1.2, 1.5",
+                0.8,
+                False,
+            ],
+            [
+                "Draft an email to a hotel asking for a special arrangement for a marriage proposal",
+                "0.4, 0.7, 1.0, 1.3",
+                0.7,
+                True,
+            ],
+            [
+                "Describe a futuristic city powered by renewable energy",
+                "0.5, 0.75, 1.0, 1.25",
+                0.6,
+                False,
+            ],
+            [
+                "Generate a poem about the ocean's depths in the style of Edgar Allan Poe",
+                "0.6, 0.8, 1.0, 1.2",
+                0.5,
+                True,
+            ],
+            [
+                "What are some innovative startup ideas for improving urban transportation?",
+                "0.45, 0.65, 0.85, 1.05",
+                0.4,
+                False,
+            ],
+        ],
     )
     iface.launch()
+
 
 if __name__ == "__main__":
     main()
