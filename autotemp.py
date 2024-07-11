@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import re
 import traceback
@@ -13,19 +14,90 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
-def log_to_json(data, filename="flagged/log.json"):
-    os.makedirs(os.path.dirname(filename), exist_ok=True)
-    data["timestamp"] = datetime.now().isoformat()
+logging.basicConfig(
+    level=logging.DEBUG, format="%(asctime)s - %(levelname)s - %(message)s"
+)
 
-    if os.path.exists(filename):
-        with open(filename, "r+") as file:
-            file_data = json.load(file)
-            file_data.append(data)
-            file.seek(0)
-            json.dump(file_data, file, indent=2)
-    else:
-        with open(filename, "w") as file:
-            json.dump([data], file, indent=2)
+
+class CustomFlaggingCallback(gr.FlaggingCallback):
+    def setup(self, components, flagging_dir: str):
+        self.flagging_dir = "flagged"
+        os.makedirs(self.flagging_dir, exist_ok=True)
+        self.log_file = os.path.join(self.flagging_dir, "flagged_data.json")
+        logging.info(f"Flagging directory set up: {self.flagging_dir}")
+
+    def flag(self, flag_data, flag_option=None, flag_index=None, username=None):
+        logging.debug(f"Received flag_data: {flag_data}")
+        logging.debug(
+            f"flag_option: {flag_option}, flag_index: {flag_index}, username: {username}"
+        )
+
+        try:
+            entry = {
+                "metadata": {
+                    "prompt": flag_data[0] if len(flag_data) > 0 else "",
+                    "temperature_string": flag_data[1] if len(flag_data) > 1 else "",
+                    "top_p": flag_data[2] if len(flag_data) > 2 else None,
+                    "auto_select": flag_data[3] if len(flag_data) > 3 else None,
+                    "model_version": flag_data[5] if len(flag_data) > 5 else "unknown",
+                    "timestamp": datetime.now().isoformat(),
+                },
+                "results": self.parse_output(
+                    flag_data[4] if len(flag_data) > 4 else ""
+                ),
+            }
+
+            logging.debug(f"Created entry: {entry}")
+
+            if os.path.exists(self.log_file):
+                with open(self.log_file, "r+") as file:
+                    try:
+                        file_data = json.load(file)
+                    except json.JSONDecodeError:
+                        logging.warning(
+                            f"Could not decode existing JSON in {self.log_file}. Starting with empty list."
+                        )
+                        file_data = []
+                    file_data.append(entry)
+                    file.seek(0)
+                    json.dump(file_data, file, indent=2)
+            else:
+                with open(self.log_file, "w") as file:
+                    json.dump([entry], file, indent=2)
+
+            logging.info(f"Flagged and saved to {self.log_file}")
+            return f"Flagged and saved to {self.log_file}"
+
+        except Exception as e:
+            logging.error(f"Error while flagging: {str(e)}", exc_info=True)
+            return f"Error while flagging: {str(e)}"
+
+    def parse_output(self, output):
+        results = []
+        pattern = (
+            r"Temp (\d+\.\d+) \| Top-p (\d+\.\d+) \| Score: (\d+\.\d+):(.*?)(?=Temp|\Z)"
+        )
+        matches = re.findall(pattern, output, re.DOTALL)
+
+        for match in matches:
+            temperature, top_p, score, text = match
+            results.append(
+                {
+                    "temperature": float(temperature),
+                    "top_p": float(top_p),
+                    "score": float(score),
+                    "output": text.strip(),
+                }
+            )
+
+        return results
+
+    def parse_metadata(self, line):
+        parts = line.split("|")
+        temp = float(parts[0].split()[1]) if len(parts) > 0 else 0.0
+        top_p = float(parts[1].split()[2]) if len(parts) > 1 else 1.0
+        score = float(parts[2].split()[2]) if len(parts) > 2 else 0.0
+        return temp, top_p, score
 
 
 class AutoTemp:
@@ -43,9 +115,7 @@ class AutoTemp:
         openai.api_key = self.api_key
 
         self.default_temp = default_temp
-        self.alt_temps = (
-            alt_temps if alt_temps else [0.0, 0.25, 0.5, 0.75, 1.0, 1.25, 1.5]
-        )
+        self.alt_temps = alt_temps if alt_temps else [0.4, 0.6, 0.8, 1.0, 1.2, 1.4]
         self.auto_select = auto_select
         self.max_workers = max_workers
         self.model_version = model_version
@@ -155,19 +225,7 @@ class AutoTemp:
 def run_autotemp(prompt, temperature_string, top_p, auto_select):
     agent = AutoTemp(auto_select=auto_select)
     output = agent.run(prompt, temperature_string, top_p=float(top_p))
-
-    # Log the data
-    log_data = {
-        "prompt": prompt,
-        "temperature_string": temperature_string,
-        "top_p": top_p,
-        "auto_select": auto_select,
-        "output": output,
-        "model_version": agent.model_version,
-    }
-    log_to_json(log_data)
-
-    return output
+    return output, agent.model_version
 
 
 # Gradio interface setup
@@ -175,14 +233,17 @@ def main():
     iface = gr.Interface(
         fn=run_autotemp,
         inputs=[
-            "text",
-            "text",
+            gr.Textbox(label="Prompt"),
+            gr.Textbox(label="Temperature String"),
             gr.Slider(
-                minimum=0.0, maximum=1.0, step=0.1, value=1.0, label="top-p value"
+                minimum=0.0, maximum=1.0, step=0.1, value=1.0, label="Top-p value"
             ),
-            "checkbox",
+            gr.Checkbox(label="Auto Select"),
         ],
-        outputs="text",
+        outputs=[
+            "text",
+            "text",
+        ],  # Two outputs: one for the result, one for model_version
         title="AutoTemp: Enhanced LLM Responses with Temperature and Top-p Tuning",
         description="""AutoTemp generates responses at different temperatures, evaluates them, and ranks them based on quality. 
                        Enter temperatures separated by commas for evaluation.
@@ -260,6 +321,8 @@ Adjusting both temperature and top-p helps tailor the AI's output to your specif
                 False,
             ],
         ],
+        flagging_callback=CustomFlaggingCallback(),
+        flagging_options=["for review"],
     )
     iface.launch()
 
