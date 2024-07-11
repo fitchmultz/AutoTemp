@@ -253,7 +253,7 @@ def main():
         article="""**FAQs**
 
 **What's Top-p?** 'Top-p' controls the diversity of AI responses: a low 'top-p' makes output more focused and predictable, while a high 'top-p' encourages variety and surprise. Pair with temperature to fine-tune AI creativity: higher temperatures with high 'top-p' for bold ideas, or lower temperatures with low 'top-p' for precise answers. 
-Using top_p=1 essentially disables the "nucleus sampling" feature, where only the most probable tokens are considered. This is equivalent to using full softmax probability distribution to sample the next word.
+Using top_p=0 essentially disables the "nucleus sampling" feature, where only the most probable tokens are considered. This is equivalent to using full softmax probability distribution to sample the next word.
 
 **How Does Temperature Affect AI Outputs?** Temperature controls the randomness of word selection. Lower temperatures lead to more predictable text, while higher temperatures allow for more novel text generation.
 
