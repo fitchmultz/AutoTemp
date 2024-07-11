@@ -149,3 +149,6 @@ cython_debug/
 
 # Flagged outputs
 flagged/
+
+# Tests
+test_code

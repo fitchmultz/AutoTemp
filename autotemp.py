@@ -107,7 +107,7 @@ class AutoTemp:
         alt_temps=None,
         auto_select=True,
         max_workers=6,
-        model_version="gpt-3.5-turbo",
+        model_version="gpt-4o",
     ):
         self.api_key = os.getenv("OPENAI_API_KEY")
         if not self.api_key:
@@ -149,23 +149,23 @@ class AutoTemp:
     def evaluate_output(self, output, temperature, top_p):
         fixed_top_p_for_evaluation = 1.0
         eval_prompt = f"""
-            Evaluate the following output which was generated at a temperature setting of {temperature}. Provide a precise score from 0.0 to 100.0, considering the following criteria:
+            You are tasked with evaluating an AI-generated output and providing a precise score from 0.0 to 100.0. The output was generated at a temperature setting of {temperature}. Your evaluation should be based on the following criteria:
 
-            - Relevance: How well does the output address the prompt or task at hand?
-            - Clarity: Is the output easy to understand and free of ambiguity?
-            - Utility: How useful is the output for its intended purpose?
-            - Pride: If the user had to submit this output to the world for their career, would they be proud?
-            - Delight: Is the output likely to delight or positively surprise the user?
+            1. Relevance: How well does the output address the prompt or task at hand?
+            2. Clarity: Is the output easy to understand and free of ambiguity?
+            3. Utility: How useful is the output for its intended purpose?
+            4. Pride: If the user had to submit this output to the world for their career, would they be proud?
+            5. Delight: Is the output likely to delight or positively surprise the user?
 
-            Be sure to comprehensively evaluate the output, it is very important for my career. Please answer with just the score with one decimal place accuracy, such as 42.0 or 96.9. Be extremely critical.
+            Analyze the output thoroughly based on each criterion. Be extremely critical in your evaluation, as this is very important for the user's career. After your analysis, calculate a final score from 0.0 to 100.0, considering all criteria equally. Please answer with just the score with one decimal place accuracy, such as 42.0 or 96.9. Be extremely critical.
 
-            Output to evaluate:
+            Here is the output you need to evaluate:
             ---
             {output}
             ---
             """
         score_text = self.generate_with_openai(
-            eval_prompt, 0.69, fixed_top_p_for_evaluation
+            eval_prompt, 1.00, fixed_top_p_for_evaluation
         )
         score_match = re.search(r"\b\d+(\.\d)?\b", score_text)
         if score_match:
@@ -318,6 +318,12 @@ Adjusting both temperature and top-p helps tailor the AI's output to your specif
                 "What are some innovative startup ideas for improving urban transportation?",
                 "0.45, 0.65, 0.85, 1.05",
                 0.4,
+                False,
+            ],
+            [
+                "Explain cybersecurity to a 5-year-old who has never used a computer before",
+                "0.00, 0.25, 0.5, 0.75, 1.0, 1.25, 1.5",
+                1.0,
                 False,
             ],
         ],
