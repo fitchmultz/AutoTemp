@@ -108,6 +108,7 @@ class AutoTemp:
         auto_select=True,
         max_workers=6,
         model_version="gpt-4o",
+        frequency_penalty=0.0,
     ):
         self.api_key = os.getenv("OPENAI_API_KEY")
         if not self.api_key:
@@ -119,8 +120,11 @@ class AutoTemp:
         self.auto_select = auto_select
         self.max_workers = max_workers
         self.model_version = model_version
+        self.frequency_penalty = frequency_penalty
 
-    def generate_with_openai(self, prompt, temperature, top_p, retries=3):
+    def generate_with_openai(
+        self, prompt, temperature, top_p, frequency_penalty, retries=3
+    ):
         while retries > 0:
             try:
                 response = openai.chat.completions.create(
@@ -131,6 +135,7 @@ class AutoTemp:
                     ],
                     temperature=temperature,
                     top_p=top_p,
+                    frequency_penalty=frequency_penalty,
                 )
                 # Adjusted to use attribute access instead of dictionary access
                 message = response.choices[0].message.content
@@ -146,7 +151,7 @@ class AutoTemp:
                     )
                     return f"Error generating text at temperature {temperature} and top-p {top_p}: {e}"
 
-    def evaluate_output(self, output, temperature, top_p):
+    def evaluate_output(self, output, temperature, top_p, frequency_penalty):
         fixed_top_p_for_evaluation = 1.0
         eval_prompt = f"""
             You are tasked with evaluating an AI-generated output and providing a precise score from 0.0 to 100.0. The output was generated at a temperature setting of {temperature}. Your evaluation should be based on the following criteria:
@@ -165,7 +170,7 @@ class AutoTemp:
             ---
             """
         score_text = self.generate_with_openai(
-            eval_prompt, 1.00, fixed_top_p_for_evaluation
+            eval_prompt, 1.00, fixed_top_p_for_evaluation, frequency_penalty
         )
         score_match = re.search(r"\b\d+(\.\d)?\b", score_text)
         if score_match:
@@ -175,7 +180,7 @@ class AutoTemp:
         else:
             return 0.0  # Unable to parse score, default to 0.0
 
-    def run(self, prompt, temperature_string, top_p):
+    def run(self, prompt, temperature_string, top_p, frequency_penalty):
         temperature_list = [
             float(temp.strip()) for temp in temperature_string.split(",")
         ]
@@ -183,7 +188,9 @@ class AutoTemp:
         scores = {}
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
             future_to_temp = {
-                executor.submit(self.generate_with_openai, prompt, temp, top_p): temp
+                executor.submit(
+                    self.generate_with_openai, prompt, temp, top_p, frequency_penalty
+                ): temp
                 for temp in temperature_list
             }
             for future in as_completed(future_to_temp):
@@ -196,8 +203,9 @@ class AutoTemp:
                     if output_text and not output_text.startswith("Error"):
                         outputs[temp] = output_text
                         scores[temp] = self.evaluate_output(
-                            output_text, temp, top_p
-                        )  # Pass top_p here
+                            output_text, temp, top_p, frequency_penalty
+                        )  # Pass top_p and frequency_penalty here
+
                 except Exception as e:
                     print(
                         f"Error while generating or evaluating output for temp {temp}: {e}"
@@ -213,18 +221,23 @@ class AutoTemp:
         # If auto_select is enabled, return only the best result
         if self.auto_select:
             best_temp, best_output, best_score = sorted_outputs[0]
-            return f"Best AutoTemp Output (Temp {best_temp} | Top-p {top_p} | Score: {best_score}):\n{best_output}"
+            return f"Best AutoTemp Output (Temp {best_temp} | Top-p {top_p} | Frequency Penalty {frequency_penalty} | Score: {best_score}):\n{best_output}"
         else:
             return "\n".join(
-                f"Temp {temp} | Top-p {top_p} | Score: {score}:\n{text}"
+                f"Temp {temp} | Top-p {top_p} | Frequency Penalty {frequency_penalty} | Score: {score}:\n{text}"
                 for temp, text, score in sorted_outputs
             )
 
 
 # Gradio app logic
-def run_autotemp(prompt, temperature_string, top_p, auto_select):
+def run_autotemp(prompt, temperature_string, top_p, frequency_penalty, auto_select):
     agent = AutoTemp(auto_select=auto_select)
-    output = agent.run(prompt, temperature_string, top_p=float(top_p))
+    output = agent.run(
+        prompt,
+        temperature_string,
+        top_p=float(top_p),
+        frequency_penalty=float(frequency_penalty),
+    )
     return output, agent.model_version
 
 
@@ -237,6 +250,13 @@ def main():
             gr.Textbox(label="Temperature String"),
             gr.Slider(
                 minimum=0.0, maximum=1.0, step=0.1, value=1.0, label="Top-p value"
+            ),
+            gr.Slider(
+                minimum=-2.0,
+                maximum=2.0,
+                step=0.1,
+                value=0.0,
+                label="Frequency Penalty",
             ),
             gr.Checkbox(label="Auto Select"),
         ],
@@ -282,48 +302,56 @@ Adjusting both temperature and top-p helps tailor the AI's output to your specif
                 "Write a short story about AGI learning to love",
                 "0.5, 0.7, 0.9, 1.1",
                 1.0,
+                0.0,
                 False,
             ],
             [
                 "Create a dialogue between a chef and an alien creating an innovative new recipe",
                 "0.3, 0.6, 0.9, 1.2",
                 0.9,
+                0.0,
                 True,
             ],
             [
                 "Explain quantum computing to a 5-year-old",
                 "0.4, 0.8, 1.2, 1.5",
                 0.8,
+                0.0,
                 False,
             ],
             [
                 "Draft an email to a hotel asking for a special arrangement for a marriage proposal",
                 "0.4, 0.7, 1.0, 1.3",
                 0.7,
+                0.0,
                 True,
             ],
             [
                 "Describe a futuristic city powered by renewable energy",
                 "0.5, 0.75, 1.0, 1.25",
                 0.6,
+                0.0,
                 False,
             ],
             [
                 "Generate a poem about the ocean's depths in the style of Edgar Allan Poe",
                 "0.6, 0.8, 1.0, 1.2",
                 0.5,
+                0.0,
                 True,
             ],
             [
                 "What are some innovative startup ideas for improving urban transportation?",
                 "0.45, 0.65, 0.85, 1.05",
                 0.4,
+                0.0,
                 False,
             ],
             [
                 "Explain cybersecurity to a 5-year-old who has never used a computer before",
                 "0.00, 0.25, 0.5, 0.75, 1.0, 1.25, 1.5",
                 1.0,
+                0.0,
                 False,
             ],
         ],
