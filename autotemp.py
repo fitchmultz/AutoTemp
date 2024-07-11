@@ -1,7 +1,9 @@
+import json
 import os
 import re
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 
 import gradio as gr
 import openai
@@ -9,6 +11,21 @@ from dotenv import load_dotenv
 
 # Load environment variables from .env file
 load_dotenv()
+
+
+def log_to_json(data, filename="flagged/log.json"):
+    os.makedirs(os.path.dirname(filename), exist_ok=True)
+    data["timestamp"] = datetime.now().isoformat()
+
+    if os.path.exists(filename):
+        with open(filename, "r+") as file:
+            file_data = json.load(file)
+            file_data.append(data)
+            file.seek(0)
+            json.dump(file_data, file, indent=2)
+    else:
+        with open(filename, "w") as file:
+            json.dump([data], file, indent=2)
 
 
 class AutoTemp:
@@ -26,7 +43,9 @@ class AutoTemp:
         openai.api_key = self.api_key
 
         self.default_temp = default_temp
-        self.alt_temps = alt_temps if alt_temps else [0.4, 0.6, 0.8, 1.0, 1.2, 1.4]
+        self.alt_temps = (
+            alt_temps if alt_temps else [0.0, 0.25, 0.5, 0.75, 1.0, 1.25, 1.5]
+        )
         self.auto_select = auto_select
         self.max_workers = max_workers
         self.model_version = model_version
@@ -136,6 +155,18 @@ class AutoTemp:
 def run_autotemp(prompt, temperature_string, top_p, auto_select):
     agent = AutoTemp(auto_select=auto_select)
     output = agent.run(prompt, temperature_string, top_p=float(top_p))
+
+    # Log the data
+    log_data = {
+        "prompt": prompt,
+        "temperature_string": temperature_string,
+        "top_p": top_p,
+        "auto_select": auto_select,
+        "output": output,
+        "model_version": agent.model_version,
+    }
+    log_to_json(log_data)
+
     return output
 
 
