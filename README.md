@@ -1,44 +1,141 @@
 # AutoTemp
 
-AutoTemp is a Python tool that enhances language model interactions by intelligently selecting the optimal temperature setting for generating responses. It leverages multiple temperature settings to produce a variety of outputs and then evaluates these outputs to determine which temperature yields the best result for a given prompt.
+AutoTemp is an intelligent parameter tuning system for Large Language Models that automatically optimizes generation parameters based on prompt type and historical performance.
 
 ## Features
 
-- **Multi-Temperature Evaluation**: Tests multiple temperature settings to find the best output for a given prompt.
-- **Automatic or Manual Selection**: Supports both automatic selection of the best output based on scores and manual selection by presenting options to the user.
-- **Customizable Temperature Range**: Users can define a custom range of temperatures to be tested for each prompt.
-- **Easy Integration**: Designed to work with OpenAI's GPT-3.5 or GPT-4 and is compatible with other language models that support temperature settings.
+- **Smart Prompt Analysis**: Automatically detects prompt types (creative writing, technical explanation, business formal, etc.)
+- **Dynamic Parameter Optimization**: Intelligently selects and tunes temperature, top-p, and frequency penalty values
+- **Historical Learning**: Learns from successful generations to improve future parameter recommendations
+- **Parallel Processing**: Efficiently generates and evaluates multiple outputs simultaneously
+- **Customizable**: Supports both automatic and manual parameter configuration
 
 ## Installation
 
-To install AutoTemp, you can simply clone the repository and install the required dependencies.
+1. Clone the repository:
 
-    git clone https://github.com/elder-plinius/AutoTemp.git
-    cd AutoTemp
-    pip install -r requirements.txt
+   ```bash
+   git clone https://github.com/yourusername/AutoTemp.git
+   cd AutoTemp
+   ```
 
-## OpenAI API Key
+2. Create and activate a virtual environment (recommended):
 
-Before running AutoTemp, you need to set up your API key in an .env file at the root of the project:
+   ```bash
+   python -m venv venv
+   source venv/bin/activate  # On Windows: venv\Scripts\activate
+   ```
 
-    OPENAI_API_KEY='your-api-key-here'
+3. Install dependencies:
 
-This file should not be committed to your version control system as it contains sensitive information.
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+4. Create a `.env` file in the project root:
+
+   ```bash
+   OPENAI_API_KEY=your_api_key_here
+   OPENAI_MODEL=gpt-4  # Optional, defaults to gpt-4o if not specified
+   ```
 
 ## Usage
 
-To use AutoTemp, simply run the autotemp.py script with Python:
+1. Start the Gradio interface:
 
-    python autotemp.py
+   ```bash
+   python autotemp.py
+   ```
 
-You can pass your prompt directly into the AutoTemp class instance within the script.
+2. Access the web interface at `http://localhost:7860`
 
-## Configuration
+3. Enter your prompt and optionally configure:
+   - Temperature values
+   - Top-p values
+   - Frequency penalty values
+   - Auto-select best output
+   - Maximum number of generations
 
-You can customize the behavior of AutoTemp by setting the following parameters when initializing AutoTemp:
+## Parameter Guidelines
 
-    default_temp: The default temperature to use for initial output.
-    alt_temps: A list of alternative temperatures to evaluate.
-    auto_select: Whether to automatically select the best output or present options to the user.
-    max_workers: The maximum number of threads to use for concurrent API calls.
-    model_version: Specifies the model version to use, such as "gpt-3.5-turbo" or "gpt-4".
+### Temperature (0.0 - 2.0)
+
+- **Low (0.1-0.5)**: More focused, deterministic outputs
+- **Medium (0.6-0.9)**: Balanced creativity and coherence
+- **High (1.0+)**: More creative and experimental
+
+### Top-p (0.0 - 1.0)
+
+- **Low (0.1-0.5)**: Very focused token selection
+- **Medium (0.6-0.8)**: Balanced selection
+- **High (0.9-1.0)**: More diverse token options
+
+### Frequency Penalty (-2.0 - 2.0)
+
+- **Negative**: May allow more repetition
+- **Zero**: Neutral
+- **Positive**: Encourages more diverse vocabulary
+
+## Prompt Types
+
+AutoTemp automatically detects and optimizes for different prompt types:
+
+1. **Creative Writing**
+
+   - Higher temperatures (0.7-1.3)
+   - Higher top-p (0.9)
+   - Moderate frequency penalty (0.3)
+
+2. **Technical Explanation**
+
+   - Lower temperatures (0.3-0.7)
+   - Medium top-p (0.7)
+   - Low frequency penalty (0.0)
+
+3. **Business Formal**
+
+   - Medium temperatures (0.4-0.8)
+   - Medium-high top-p (0.8)
+   - Low frequency penalty (0.1)
+
+4. **Brainstorming**
+
+   - Higher temperatures (0.8-1.4)
+   - Maximum top-p (1.0)
+   - High frequency penalty (0.5)
+
+5. **Humor/Casual**
+   - Balanced temperatures (0.6-1.0)
+   - High top-p (0.9)
+   - Moderate frequency penalty (0.3)
+
+## Performance Optimization
+
+- Utilizes parallel processing for both generation and evaluation
+- Configurable maximum workers (default: 12)
+- Adjustable rate limiting (default: 90 requests per minute)
+- Smart retry logic with exponential backoff
+
+## Data Storage
+
+- Parameter history is stored in `flagged/parameter_history.json`
+- Flagged outputs are stored in `flagged/flagged_data.json`
+- Historical data is used to improve parameter recommendations
+
+## Contributing
+
+1. Fork the repository
+2. Create your feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit your changes (`git commit -m 'Add amazing feature'`)
+4. Push to the branch (`git push origin feature/amazing-feature`)
+5. Open a Pull Request
+
+## License
+
+This project is licensed under the MIT License - see the LICENSE file for details.
+
+## Acknowledgments
+
+- Built with OpenAI's GPT-4o API
+- Interface powered by Gradio
+- Inspired by the need for better parameter tuning in LLM applications
