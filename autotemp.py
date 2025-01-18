@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import re
+import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
@@ -216,6 +217,62 @@ class CustomFlaggingCallback(gr.FlaggingCallback):
         return temp, top_p, score
 
 
+class RateLimiter:
+    def __init__(self, max_requests_per_minute=60):
+        self.max_requests_per_minute = max_requests_per_minute
+        self.requests = []
+        self.min_delay = 1.0 / (
+            max_requests_per_minute / 60.0
+        )  # Minimum delay between requests
+        self.last_request_time = 0
+
+    def wait_if_needed(self):
+        """Wait if we're exceeding our rate limit"""
+        current_time = time.time()
+
+        # Remove requests older than 1 minute
+        self.requests = [t for t in self.requests if current_time - t < 60]
+
+        # If we're at the limit, wait
+        if len(self.requests) >= self.max_requests_per_minute:
+            sleep_time = self.requests[0] + 60 - current_time
+            if sleep_time > 0:
+                time.sleep(sleep_time)
+
+        # Ensure minimum delay between requests
+        time_since_last = current_time - self.last_request_time
+        if time_since_last < self.min_delay:
+            time.sleep(self.min_delay - time_since_last)
+
+        self.requests.append(current_time)
+        self.last_request_time = time.time()
+
+
+class RequestTracker:
+    def __init__(self):
+        self.request_times = []
+        self.error_counts = {}
+
+    def track_request(self, duration: float, error: str = None):
+        """Track a request's duration and any errors"""
+        self.request_times.append(duration)
+        if error:
+            self.error_counts[error] = self.error_counts.get(error, 0) + 1
+
+    def get_stats(self) -> Dict:
+        """Get statistics about requests"""
+        if not self.request_times:
+            return {"avg_time": 0, "max_time": 0, "min_time": 0, "total_requests": 0}
+
+        return {
+            "avg_time": sum(self.request_times) / len(self.request_times),
+            "max_time": max(self.request_times),
+            "min_time": min(self.request_times),
+            "total_requests": len(self.request_times),
+            "error_counts": self.error_counts,
+        }
+
+
 class AutoTemp:
     def __init__(
         self,
@@ -225,6 +282,10 @@ class AutoTemp:
         max_workers=6,
         model_version="gpt-4",
         frequency_penalty=0.0,
+        max_retries=5,
+        initial_retry_delay=1.0,
+        max_retry_delay=32.0,
+        max_requests_per_minute=60,
     ):
         self.api_key = os.getenv("OPENAI_API_KEY")
         if not self.api_key:
@@ -238,8 +299,15 @@ class AutoTemp:
         self.model_version = model_version
         self.frequency_penalty = frequency_penalty
 
+        # Rate limiting and retry settings
+        self.max_retries = max_retries
+        self.initial_retry_delay = initial_retry_delay
+        self.max_retry_delay = max_retry_delay
+
         self.prompt_analyzer = PromptAnalyzer()
         self.parameter_history = ParameterHistory()
+        self.rate_limiter = RateLimiter(max_requests_per_minute)
+        self.request_tracker = RequestTracker()
 
     def get_recommended_params(self, prompt: str) -> Tuple[List[float], float, float]:
         """Get recommended parameters based on prompt type and historical performance."""
@@ -265,10 +333,22 @@ class AutoTemp:
         return temps, top_p, freq_penalty
 
     def generate_with_openai(
-        self, prompt, temperature, top_p, frequency_penalty, retries=3
+        self, prompt, temperature, top_p, frequency_penalty, retries=None
     ):
+        if retries is None:
+            retries = self.max_retries
+
+        retry_delay = self.initial_retry_delay
+        last_error = None
+
         while retries > 0:
             try:
+                # Wait if we're approaching rate limits
+                self.rate_limiter.wait_if_needed()
+
+                # Track request timing
+                start_time = time.time()
+
                 response = openai.chat.completions.create(
                     model=self.model_version,
                     messages=[
@@ -279,19 +359,35 @@ class AutoTemp:
                     top_p=top_p,
                     frequency_penalty=frequency_penalty,
                 )
-                # Adjusted to use attribute access instead of dictionary access
+
+                # Track successful request
+                duration = time.time() - start_time
+                self.request_tracker.track_request(duration)
+
                 message = response.choices[0].message.content
                 return message.strip()
+
+            except openai.RateLimitError as e:
+                last_error = "rate_limit"
+                # Use exponential backoff for rate limits
+                time.sleep(retry_delay)
+                retry_delay = min(retry_delay * 2, self.max_retry_delay)
+
             except Exception as e:
+                last_error = str(e)
+                time.sleep(retry_delay)
+                retry_delay = min(retry_delay * 2, self.max_retry_delay)
+
+            finally:
                 retries -= 1
-                print(
-                    f"Attempt failed with error: {e}"
-                )  # Print the error for debugging
-                if retries <= 0:
-                    print(
-                        f"Final error generating text at temperature {temperature} and top-p {top_p}: {e}"
+                if last_error:
+                    self.request_tracker.track_request(
+                        time.time() - start_time, last_error
                     )
-                    return f"Error generating text at temperature {temperature} and top-p {top_p}: {e}"
+
+        error_msg = f"Error generating text at temperature {temperature} and top-p {top_p}: {last_error}"
+        logging.error(error_msg)
+        return error_msg
 
     def evaluate_output(self, output, temperature, top_p, frequency_penalty):
         fixed_top_p_for_evaluation = 1.0
@@ -347,13 +443,22 @@ class AutoTemp:
         scores = {}
         prompt_type, _ = PromptAnalyzer.analyze_prompt(prompt)
 
-        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+        # Calculate optimal chunk size based on rate limits
+        chunk_size = min(
+            self.max_workers,
+            len(temperature_list),
+            self.rate_limiter.max_requests_per_minute
+            // 2,  # Leave room for evaluation requests
+        )
+
+        with ThreadPoolExecutor(max_workers=chunk_size) as executor:
             future_to_temp = {
                 executor.submit(
                     self.generate_with_openai, prompt, temp, top_p, frequency_penalty
                 ): temp
                 for temp in temperature_list
             }
+
             for future in as_completed(future_to_temp):
                 temp = future_to_temp[future]
                 try:
@@ -377,23 +482,37 @@ class AutoTemp:
                         )
 
                 except Exception as e:
-                    print(
+                    logging.error(
                         f"Error while generating or evaluating output for temp {temp}: {e}"
                     )
 
         if not scores:
             return "No valid outputs generated.", None
 
+        # Get request statistics
+        stats = self.request_tracker.get_stats()
+        logging.info(f"Request Statistics: {stats}")
+
         sorted_scores = sorted(scores.items(), key=lambda item: item[1], reverse=True)
         sorted_outputs = [(temp, outputs[temp], score) for temp, score in sorted_scores]
 
         if self.auto_select:
             best_temp, best_output, best_score = sorted_outputs[0]
-            return f"Best AutoTemp Output (Temp {best_temp} | Top-p {top_p} | Frequency Penalty {frequency_penalty} | Score: {best_score}):\n{best_output}"
+            return (
+                f"Best AutoTemp Output (Temp {best_temp} | Top-p {top_p} | "
+                f"Frequency Penalty {frequency_penalty} | Score: {best_score}):\n{best_output}\n\n"
+                f"Request Stats: Avg {stats['avg_time']:.2f}s, Max {stats['max_time']:.2f}s, "
+                f"Total Requests: {stats['total_requests']}"
+            )
         else:
-            return "\n".join(
-                f"Temp {temp} | Top-p {top_p} | Frequency Penalty {frequency_penalty} | Score: {score}:\n{text}"
-                for temp, text, score in sorted_outputs
+            return (
+                "\n".join(
+                    f"Temp {temp} | Top-p {top_p} | Frequency Penalty {frequency_penalty} | "
+                    f"Score: {score}:\n{text}"
+                    for temp, text, score in sorted_outputs
+                )
+                + f"\n\nRequest Stats: Avg {stats['avg_time']:.2f}s, "
+                f"Max {stats['max_time']:.2f}s, Total Requests: {stats['total_requests']}"
             )
 
 
