@@ -473,6 +473,7 @@ class AutoTemp:
         retry_delay = self.initial_retry_delay
         last_error = None
         start_time = time.time()
+        error_type = None
 
         while retries > 0:
             try:
@@ -503,18 +504,28 @@ class AutoTemp:
                 return message.strip()
 
             except openai.RateLimitError as e:
+                error_type = "rate_limit"
                 last_error = f"Rate limit error: {str(e)}"
                 logging.warning(f"Rate limit hit: {str(e)}")
                 time.sleep(retry_delay)
                 retry_delay = min(retry_delay * 2, self.max_retry_delay)
 
+            except openai.APIConnectionError as e:
+                error_type = "connection_error"
+                last_error = f"Connection error: {str(e)}"
+                logging.error(f"API Connection error: {str(e)}")
+                time.sleep(retry_delay)
+                retry_delay = min(retry_delay * 2, self.max_retry_delay)
+
             except openai.APIError as e:
+                error_type = "api_error"
                 last_error = f"API error: {str(e)}"
                 logging.error(f"OpenAI API error: {str(e)}")
                 time.sleep(retry_delay)
                 retry_delay = min(retry_delay * 2, self.max_retry_delay)
 
             except Exception as e:
+                error_type = "unexpected"
                 last_error = f"Unexpected error: {str(e)}"
                 logging.error(f"Unexpected error: {str(e)}", exc_info=True)
                 time.sleep(retry_delay)
@@ -524,12 +535,12 @@ class AutoTemp:
                 retries -= 1
                 if last_error:
                     self.request_tracker.track_request(
-                        time.time() - start_time, last_error
+                        time.time() - start_time, last_error, error_type
                     )
 
-        error_msg = f"Error generating text at temperature {temperature} and top-p {top_p}: {last_error}"
+        error_msg = f"Failed after {self.max_retries} retries with {temperature}/{top_p}/{frequency_penalty}: {last_error}"
         logging.error(error_msg)
-        return error_msg
+        return f"ERROR ({error_type}): {last_error}"
 
     def evaluate_output(self, output, temperature, top_p, frequency_penalty):
         fixed_top_p_for_evaluation = 1.0
@@ -650,6 +661,15 @@ class AutoTemp:
             ),  # Allow more concurrent requests
         )
 
+        # Track failures by type
+        failures = {
+            "rate_limit": [],
+            "api_error": [],
+            "connection_error": [],
+            "unexpected": [],
+            "evaluation_error": [],
+        }
+
         # Split evaluation into a separate thread pool to parallelize generation and evaluation
         outputs = {}
         scores = {}
@@ -670,13 +690,20 @@ class AutoTemp:
                 temp, top_p, freq = future_to_params[future]
                 try:
                     output_text = future.result()
-                    if output_text and not output_text.startswith("Error"):
+                    if output_text and not output_text.startswith("ERROR"):
                         param_key = (temp, top_p, freq)
                         outputs[param_key] = output_text
+                    else:
+                        # Parse error type from the error message
+                        error_type = "unexpected"
+                        if output_text.startswith("ERROR ("):
+                            error_type = output_text[7 : output_text.index(")")]
+                        failures[error_type].append((temp, top_p, freq))
                 except Exception as e:
                     logging.error(
                         f"Error with params temp={temp}, top_p={top_p}, freq={freq}: {e}"
                     )
+                    failures["unexpected"].append((temp, top_p, freq))
 
         # Then, evaluate all outputs in parallel
         with ThreadPoolExecutor(max_workers=chunk_size) as executor:
@@ -708,9 +735,10 @@ class AutoTemp:
                     logging.error(
                         f"Error evaluating output for params temp={temp}, top_p={top_p}, freq={freq}: {e}"
                     )
+                    failures["evaluation_error"].append((temp, top_p, freq))
 
         if not scores:
-            return "No valid outputs generated.", None
+            return "No valid outputs generated. All combinations failed.", None
 
         # Get request statistics
         stats = self.request_tracker.get_stats()
@@ -721,13 +749,37 @@ class AutoTemp:
             (params, outputs[params], score) for params, score in sorted_scores
         ]
 
+        # Generate failure summary if there were any failures
+        failure_summary = ""
+        total_failures = sum(len(f) for f in failures.values())
+        if total_failures > 0:
+            failure_summary = "\nFailure Summary:\n"
+            for error_type, failed_params in failures.items():
+                if failed_params:
+                    failure_summary += f"• {error_type.replace('_', ' ').title()}: {len(failed_params)} combinations failed\n"
+                    # Show a few examples of failed combinations
+                    if len(failed_params) <= 3:
+                        for temp, top_p, freq in failed_params:
+                            failure_summary += (
+                                f"  - temp={temp}, top_p={top_p}, freq={freq}\n"
+                            )
+                    else:
+                        for temp, top_p, freq in failed_params[:2]:
+                            failure_summary += (
+                                f"  - temp={temp}, top_p={top_p}, freq={freq}\n"
+                            )
+                        failure_summary += (
+                            f"  - ... and {len(failed_params) - 2} more\n"
+                        )
+
         if self.auto_select:
             best_params, best_output, best_score = sorted_outputs[0]
             return (
                 f"Best AutoTemp Output (Temp {best_params[0]} | Top-p {best_params[1]} | "
                 f"Frequency Penalty {best_params[2]} | Score: {best_score}):\n{best_output}\n\n"
                 f"Request Stats: Avg {stats['avg_time']:.2f}s, Max {stats['max_time']:.2f}s, "
-                f"Total Requests: {stats['total_requests']} ({len(sorted_outputs)} generations + {len(sorted_outputs)} evaluations)"
+                f"Total Requests: {stats['total_requests']} ({len(sorted_outputs)} successful generations + {len(sorted_outputs)} evaluations)"
+                f"{failure_summary}"
             )
         else:
             # Format each output with clear separation
@@ -748,10 +800,10 @@ Output:
 
             stats_summary = f"""
 Summary:
-• Total Combinations Tested: {len(sorted_outputs)}
-• Total API Requests: {stats['total_requests']} ({len(sorted_outputs)} generations + {len(sorted_outputs)} evaluations)
+• Successful Combinations: {len(sorted_outputs)} of {total_combinations}
+• Total API Requests: {stats['total_requests']} ({len(sorted_outputs)} successful generations + {len(sorted_outputs)} evaluations)
 • Average Response Time: {stats['avg_time']:.2f}s
-• Maximum Response Time: {stats['max_time']:.2f}s"""
+• Maximum Response Time: {stats['max_time']:.2f}s{failure_summary}"""
 
             return "\n".join(outputs_formatted) + "\n" + stats_summary
 
