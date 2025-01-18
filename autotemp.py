@@ -552,13 +552,45 @@ class AutoTemp:
         score_text = self.generate_with_openai(
             eval_prompt, 1.00, fixed_top_p_for_evaluation, frequency_penalty
         )
-        score_match = re.search(r"\b\d+(\.\d)?\b", score_text)
-        if score_match:
-            return round(
-                float(score_match.group()), 1
-            )  # Round the score to one decimal place
-        else:
-            return 0.0  # Unable to parse score, default to 0.0
+
+        def parse_score(text: str) -> float:
+            """Parse and validate score from evaluation text."""
+            # First try to find a score in the format XX.X or XXX.X
+            score_pattern = r"(?:^|[\s\n])(\d{1,3}(?:\.\d)?)\s*(?:$|[\s\n])"
+            matches = re.finditer(score_pattern, text)
+
+            valid_scores = []
+            for match in matches:
+                try:
+                    score = float(match.group(1))
+                    if 0 <= score <= 100:  # Validate score is in valid range
+                        valid_scores.append(score)
+                except ValueError:
+                    continue
+
+            if valid_scores:
+                # If multiple valid scores found, use the first one
+                # This handles cases where the model might discuss multiple scores
+                return round(valid_scores[0], 1)
+
+            # Fallback: Try to find any number that could be a score
+            # This catches cases where the format might be slightly different
+            fallback_pattern = r"(?:score:?\s*)?(\d{1,3}(?:\.\d*)?)"
+            fallback_matches = re.finditer(fallback_pattern, text, re.IGNORECASE)
+
+            for match in fallback_matches:
+                try:
+                    score = float(match.group(1))
+                    if 0 <= score <= 100:
+                        return round(score, 1)
+                except ValueError:
+                    continue
+
+            # If no valid score found, log the issue and return 0.0
+            logging.warning(f"Could not parse valid score from evaluation text: {text}")
+            return 0.0
+
+        return parse_score(score_text)
 
     def run(
         self,
