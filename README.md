@@ -9,6 +9,7 @@ AutoTemp is an intelligent parameter tuning system for Large Language Models tha
 - **Historical Learning**: Learns from successful generations to improve future parameter recommendations
 - **Parallel Processing**: Efficiently generates and evaluates multiple outputs simultaneously
 - **Customizable**: Supports both automatic and manual parameter configuration
+- **Performance Optimized**: Utilizes parallel processing and smart rate limiting for efficient API usage
 
 ## Installation
 
@@ -36,7 +37,7 @@ AutoTemp is an intelligent parameter tuning system for Large Language Models tha
 
    ```bash
    OPENAI_API_KEY=your_api_key_here
-   OPENAI_MODEL=gpt-4  # Optional, defaults to gpt-4o if not specified
+   OPENAI_MODEL=gpt-4o  # Optional, defaults to gpt-4o if not specified
    ```
 
 ## Usage
@@ -49,12 +50,12 @@ AutoTemp is an intelligent parameter tuning system for Large Language Models tha
 
 2. Access the web interface at `http://localhost:7860`
 
-3. Enter your prompt and optionally configure:
-   - Temperature values
-   - Top-p values
-   - Frequency penalty values
-   - Auto-select best output
-   - Maximum number of generations
+3. Configure your generation:
+   - Enter your prompt
+   - Optionally specify custom parameter values
+   - Set maximum number of generations (1-50)
+   - Choose whether to auto-select the best output
+   - Each generation requires 2 API calls (1 for generation, 1 for evaluation)
 
 ## Parameter Guidelines
 
@@ -109,12 +110,25 @@ AutoTemp automatically detects and optimizes for different prompt types:
    - High top-p (0.9)
    - Moderate frequency penalty (0.3)
 
-## Performance Optimization
+## Performance Features
 
-- Utilizes parallel processing for both generation and evaluation
-- Configurable maximum workers (default: 12)
-- Adjustable rate limiting (default: 90 requests per minute)
-- Smart retry logic with exponential backoff
+- **Parallel Processing**: Utilizes ThreadPoolExecutor for concurrent operations
+- **Smart Rate Limiting**: Automatically manages API request rates
+- **Configurable Workers**: Default 12 workers for parallel processing
+- **Request Optimization**: 90 requests per minute default rate limit
+- **Retry Logic**: Exponential backoff for failed requests
+- **Request Tracking**: Monitors API call performance and errors
+
+## Output Format
+
+When auto-select is disabled (default), you'll see:
+
+- Parameter analysis and recommendations
+- Each output clearly separated with parameters and scores
+- Performance statistics including:
+  - Total combinations tested
+  - Total API requests made
+  - Average and maximum response times
 
 ## Data Storage
 

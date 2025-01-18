@@ -365,92 +365,102 @@ class AutoTemp:
         """Get recommended parameters based on prompt type and historical performance."""
         prompt_type, base_config = PromptAnalyzer.analyze_prompt(prompt)
 
-        # If max_combinations is set, determine how many variations we can try for each parameter
-        if max_combinations:
-            # We'll distribute variations across parameters based on their typical impact
-            # Temperature usually has the most impact, so give it more variations
-            temp_variations = min(3, max(2, max_combinations // 2))
-            top_p_variations = min(2, max(1, max_combinations // 4))
-            freq_variations = min(2, max(1, max_combinations // 4))
-        else:
-            temp_variations = 3
-            top_p_variations = 3
-            freq_variations = 3
-
         # Get historical parameters
         historical_params = self.parameter_history.get_best_params(prompt_type)
 
+        # Initialize parameter lists
+        temps = []
+        top_ps = []
+        freq_penalties = []
+
         if historical_params:
-            # Use historical best with smart variations based on max_combinations
+            # Use historical means with dynamic bounding
             base_temp = round(historical_params["temperature"], 1)
             base_top_p = round(historical_params["top_p"], 1)
             base_freq = round(historical_params["frequency_penalty"], 1)
 
-            # Generate temperature variations
-            temps = [base_temp]
-            if temp_variations > 1:
-                step = 0.2
-                variations = []
-                for i in range(1, temp_variations):
-                    if i % 2 == 1 and base_temp > 0:
-                        variations.append(round(base_temp - step * ((i + 1) // 2), 1))
-                    elif base_temp < 2.0:
-                        variations.append(round(base_temp + step * (i // 2), 1))
-                temps.extend(sorted(variations))
+            # Generate variations around historical means with random offsets
+            temp_offsets = [-0.3, -0.1, 0, 0.1, 0.3]  # More granular temperature steps
+            top_p_offsets = [-0.15, -0.05, 0, 0.05, 0.15]  # Smaller top-p variations
+            freq_offsets = [-0.2, -0.1, 0, 0.1, 0.2]  # Moderate frequency penalty steps
 
-            # Generate top_p variations
-            top_ps = [base_top_p]
-            if top_p_variations > 1:
-                step = 0.1
-                for i in range(1, top_p_variations):
-                    if i % 2 == 1 and base_top_p > 0:
-                        top_ps.append(round(base_top_p - step, 1))
-                    elif base_top_p < 1.0:
-                        top_ps.append(round(base_top_p + step, 1))
-                top_ps = sorted(top_ps)
+            # Add variations while keeping within valid bounds
+            temps = [
+                round(min(max(base_temp + offset, 0.0), 2.0), 1)
+                for offset in temp_offsets
+            ]
+            top_ps = [
+                round(min(max(base_top_p + offset, 0.0), 1.0), 1)
+                for offset in top_p_offsets
+            ]
+            freq_penalties = [
+                round(min(max(base_freq + offset, -2.0), 2.0), 1)
+                for offset in freq_offsets
+            ]
 
-            # Generate frequency penalty variations
-            freq_penalties = [base_freq]
-            if freq_variations > 1:
-                step = 0.2
-                for i in range(1, freq_variations):
-                    if i % 2 == 1:
-                        freq_penalties.append(round(base_freq - step, 1))
-                    else:
-                        freq_penalties.append(round(base_freq + step, 1))
-                freq_penalties = sorted(freq_penalties)
+            # Remove duplicates while preserving order
+            temps = list(dict.fromkeys(temps))
+            top_ps = list(dict.fromkeys(top_ps))
+            freq_penalties = list(dict.fromkeys(freq_penalties))
         else:
             # Use base configuration with smart variations
             base_temps = [round(t, 1) for t in base_config["temps"]]
-
-            # Select temperatures based on variations allowed
-            if temp_variations >= len(base_temps):
-                temps = base_temps
-            else:
-                # Take evenly spaced temperatures
-                indices = [
-                    i * (len(base_temps) - 1) // (temp_variations - 1)
-                    for i in range(temp_variations)
-                ]
-                temps = [base_temps[i] for i in indices]
-
-            # For initial exploration with limited combinations
             base_top_p = round(base_config["top_p"], 1)
-            top_ps = [base_top_p]
-            if top_p_variations > 1:
-                if base_top_p > 0:
-                    top_ps.append(round(base_top_p - 0.1, 1))
-                if base_top_p < 1.0:
-                    top_ps.append(round(base_top_p + 0.1, 1))
-                top_ps = sorted(top_ps)[:top_p_variations]
-
             base_freq = round(base_config["freq_penalty"], 1)
-            freq_penalties = [base_freq]
-            if freq_variations > 1:
-                freq_penalties.extend(
-                    [round(base_freq - 0.2, 1), round(base_freq + 0.2, 1)]
-                )
-                freq_penalties = sorted(freq_penalties)[:freq_variations]
+
+            temps = base_temps
+            top_ps = [
+                round(max(0.0, min(1.0, base_top_p + offset)), 1)
+                for offset in [-0.1, 0, 0.1]
+            ]
+            freq_penalties = [
+                round(max(-2.0, min(2.0, base_freq + offset)), 1)
+                for offset in [-0.2, 0, 0.2]
+            ]
+
+        # Calculate total combinations
+        total_combinations = len(temps) * len(top_ps) * len(freq_penalties)
+
+        # If max_combinations is set and we exceed it, randomly sample combinations
+        if max_combinations and total_combinations > max_combinations:
+            import random
+
+            # Calculate how many variations we can have for each parameter
+            # Use cube root as a starting point for fair distribution
+            variations_per_param = max(1, int((max_combinations) ** (1 / 3)))
+
+            # Prioritize temperature variations slightly more
+            temp_variations = min(len(temps), variations_per_param + 1)
+            top_p_variations = min(len(top_ps), variations_per_param)
+            freq_variations = min(len(freq_penalties), variations_per_param)
+
+            # Randomly sample while preserving some structure
+            # Always include the base/mean values
+            if historical_params:
+                base_temp_idx = temps.index(base_temp)
+                base_top_p_idx = top_ps.index(base_top_p)
+                base_freq_idx = freq_penalties.index(base_freq)
+            else:
+                base_temp_idx = len(temps) // 2
+                base_top_p_idx = len(top_ps) // 2
+                base_freq_idx = len(freq_penalties) // 2
+
+            # Sample indices while ensuring base indices are included
+            temp_indices = set([base_temp_idx])
+            top_p_indices = set([base_top_p_idx])
+            freq_indices = set([base_freq_idx])
+
+            while len(temp_indices) < temp_variations:
+                temp_indices.add(random.randint(0, len(temps) - 1))
+            while len(top_p_indices) < top_p_variations:
+                top_p_indices.add(random.randint(0, len(top_ps) - 1))
+            while len(freq_indices) < freq_variations:
+                freq_indices.add(random.randint(0, len(freq_penalties) - 1))
+
+            # Update parameter lists with sampled values
+            temps = [temps[i] for i in sorted(temp_indices)]
+            top_ps = [top_ps[i] for i in sorted(top_p_indices)]
+            freq_penalties = [freq_penalties[i] for i in sorted(freq_indices)]
 
         return temps, top_ps, freq_penalties
 
