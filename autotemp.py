@@ -320,7 +320,7 @@ class AutoTemp:
         self,
         default_temp=0.0,
         alt_temps=None,
-        auto_select=True,
+        auto_select=False,
         max_workers=12,
         model_version=None,
         frequency_penalty=0.0,
