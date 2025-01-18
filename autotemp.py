@@ -5,6 +5,7 @@ import re
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
+from typing import Dict, List, Tuple
 
 import gradio as gr
 import openai
@@ -13,10 +14,125 @@ from dotenv import load_dotenv
 # Load environment variables from .env file
 load_dotenv()
 
-
 logging.basicConfig(
     level=logging.DEBUG, format="%(asctime)s - %(levelname)s - %(message)s"
 )
+
+
+class PromptAnalyzer:
+    PROMPT_TYPES = {
+        "creative_writing": {
+            "keywords": ["write", "story", "poem", "creative", "imagine", "describe"],
+            "temps": [0.7, 0.9, 1.1, 1.3],
+            "top_p": 0.9,
+            "freq_penalty": 0.3,
+        },
+        "technical_explanation": {
+            "keywords": ["explain", "how", "what", "why", "technical", "concept"],
+            "temps": [0.3, 0.5, 0.7],
+            "top_p": 0.7,
+            "freq_penalty": 0.0,
+        },
+        "business_formal": {
+            "keywords": ["email", "draft", "business", "formal", "professional"],
+            "temps": [0.4, 0.6, 0.8],
+            "top_p": 0.8,
+            "freq_penalty": 0.1,
+        },
+        "brainstorming": {
+            "keywords": [
+                "ideas",
+                "brainstorm",
+                "suggest",
+                "innovative",
+                "possibilities",
+            ],
+            "temps": [0.8, 1.0, 1.2, 1.4],
+            "top_p": 1.0,
+            "freq_penalty": 0.5,
+        },
+    }
+
+    @classmethod
+    def analyze_prompt(cls, prompt: str) -> Tuple[str, Dict]:
+        """Analyze the prompt and return the most likely prompt type and recommended parameters."""
+        prompt_lower = prompt.lower()
+        scores = {}
+
+        for prompt_type, config in cls.PROMPT_TYPES.items():
+            score = sum(1 for keyword in config["keywords"] if keyword in prompt_lower)
+            scores[prompt_type] = score
+
+        best_type = max(scores.items(), key=lambda x: x[1])[0]
+        return best_type, cls.PROMPT_TYPES[best_type]
+
+
+class ParameterHistory:
+    def __init__(self, history_file="flagged/parameter_history.json"):
+        self.history_file = history_file
+        self.ensure_history_file()
+
+    def ensure_history_file(self):
+        os.makedirs(os.path.dirname(self.history_file), exist_ok=True)
+        if not os.path.exists(self.history_file):
+            with open(self.history_file, "w") as f:
+                json.dump({"prompt_types": {}}, f)
+
+    def update_history(self, prompt_type: str, params: Dict, score: float):
+        try:
+            with open(self.history_file, "r") as f:
+                history = json.load(f)
+        except (json.JSONDecodeError, FileNotFoundError):
+            history = {"prompt_types": {}}
+
+        if prompt_type not in history["prompt_types"]:
+            history["prompt_types"][prompt_type] = []
+
+        history["prompt_types"][prompt_type].append(
+            {"params": params, "score": score, "timestamp": datetime.now().isoformat()}
+        )
+
+        # Keep only the last 100 entries per type
+        history["prompt_types"][prompt_type] = history["prompt_types"][prompt_type][
+            -100:
+        ]
+
+        with open(self.history_file, "w") as f:
+            json.dump(history, f, indent=2)
+
+    def get_best_params(self, prompt_type: str) -> Dict:
+        try:
+            with open(self.history_file, "r") as f:
+                history = json.load(f)
+        except (json.JSONDecodeError, FileNotFoundError):
+            return None
+
+        if (
+            prompt_type not in history["prompt_types"]
+            or not history["prompt_types"][prompt_type]
+        ):
+            return None
+
+        # Get the top 5 highest scoring parameter combinations
+        sorted_entries = sorted(
+            history["prompt_types"][prompt_type], key=lambda x: x["score"], reverse=True
+        )[:5]
+
+        # Average the parameters of the top 5 entries
+        avg_params = {
+            "temperature": sum(
+                entry["params"]["temperature"] for entry in sorted_entries
+            )
+            / len(sorted_entries),
+            "top_p": sum(entry["params"]["top_p"] for entry in sorted_entries)
+            / len(sorted_entries),
+            "frequency_penalty": sum(
+                entry["params"]["frequency_penalty"] for entry in sorted_entries
+            )
+            / len(sorted_entries),
+        }
+
+        return avg_params
 
 
 class CustomFlaggingCallback(gr.FlaggingCallback):
@@ -107,7 +223,7 @@ class AutoTemp:
         alt_temps=None,
         auto_select=True,
         max_workers=6,
-        model_version="gpt-4o",
+        model_version="gpt-4",
         frequency_penalty=0.0,
     ):
         self.api_key = os.getenv("OPENAI_API_KEY")
@@ -116,11 +232,37 @@ class AutoTemp:
         openai.api_key = self.api_key
 
         self.default_temp = default_temp
-        self.alt_temps = alt_temps if alt_temps else [0.4, 0.6, 0.8, 1.0, 1.2, 1.4]
+        self.alt_temps = alt_temps
         self.auto_select = auto_select
         self.max_workers = max_workers
         self.model_version = model_version
         self.frequency_penalty = frequency_penalty
+
+        self.prompt_analyzer = PromptAnalyzer()
+        self.parameter_history = ParameterHistory()
+
+    def get_recommended_params(self, prompt: str) -> Tuple[List[float], float, float]:
+        """Get recommended parameters based on prompt type and historical performance."""
+        prompt_type, base_config = PromptAnalyzer.analyze_prompt(prompt)
+
+        # Check historical performance
+        historical_params = self.parameter_history.get_best_params(prompt_type)
+
+        if historical_params:
+            # Blend historical parameters with base configuration
+            temps = [
+                historical_params["temperature"] - 0.2,
+                historical_params["temperature"],
+                historical_params["temperature"] + 0.2,
+            ]
+            top_p = historical_params["top_p"]
+            freq_penalty = historical_params["frequency_penalty"]
+        else:
+            temps = base_config["temps"]
+            top_p = base_config["top_p"]
+            freq_penalty = base_config["freq_penalty"]
+
+        return temps, top_p, freq_penalty
 
     def generate_with_openai(
         self, prompt, temperature, top_p, frequency_penalty, retries=3
@@ -180,12 +322,31 @@ class AutoTemp:
         else:
             return 0.0  # Unable to parse score, default to 0.0
 
-    def run(self, prompt, temperature_string, top_p, frequency_penalty):
-        temperature_list = [
-            float(temp.strip()) for temp in temperature_string.split(",")
-        ]
+    def run(self, prompt, temperature_string=None, top_p=None, frequency_penalty=None):
+        # Get recommended parameters if not explicitly provided
+        recommended_temps, recommended_top_p, recommended_freq_penalty = (
+            self.get_recommended_params(prompt)
+        )
+
+        # Use provided parameters or recommended ones
+        if temperature_string is None or temperature_string.strip() == "":
+            temperature_list = recommended_temps
+        else:
+            temperature_list = [
+                float(temp.strip()) for temp in temperature_string.split(",")
+            ]
+
+        top_p = float(top_p) if top_p is not None else recommended_top_p
+        frequency_penalty = (
+            float(frequency_penalty)
+            if frequency_penalty is not None
+            else recommended_freq_penalty
+        )
+
         outputs = {}
         scores = {}
+        prompt_type, _ = PromptAnalyzer.analyze_prompt(prompt)
+
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
             future_to_temp = {
                 executor.submit(
@@ -197,14 +358,23 @@ class AutoTemp:
                 temp = future_to_temp[future]
                 try:
                     output_text = future.result()
-                    print(
-                        f"Output for temp {temp}: {output_text}"
-                    )  # Print the output for debugging
                     if output_text and not output_text.startswith("Error"):
                         outputs[temp] = output_text
-                        scores[temp] = self.evaluate_output(
+                        score = self.evaluate_output(
                             output_text, temp, top_p, frequency_penalty
-                        )  # Pass top_p and frequency_penalty here
+                        )
+                        scores[temp] = score
+
+                        # Update parameter history
+                        self.parameter_history.update_history(
+                            prompt_type,
+                            {
+                                "temperature": temp,
+                                "top_p": top_p,
+                                "frequency_penalty": frequency_penalty,
+                            },
+                            score,
+                        )
 
                 except Exception as e:
                     print(
@@ -214,11 +384,9 @@ class AutoTemp:
         if not scores:
             return "No valid outputs generated.", None
 
-        # Sort the scores by value in descending order and return the sorted outputs
         sorted_scores = sorted(scores.items(), key=lambda item: item[1], reverse=True)
         sorted_outputs = [(temp, outputs[temp], score) for temp, score in sorted_scores]
 
-        # If auto_select is enabled, return only the best result
         if self.auto_select:
             best_temp, best_output, best_score = sorted_outputs[0]
             return f"Best AutoTemp Output (Temp {best_temp} | Top-p {top_p} | Frequency Penalty {frequency_penalty} | Score: {best_score}):\n{best_output}"
@@ -232,13 +400,31 @@ class AutoTemp:
 # Gradio app logic
 def run_autotemp(prompt, temperature_string, top_p, frequency_penalty, auto_select):
     agent = AutoTemp(auto_select=auto_select)
+
+    # Get recommended parameters
+    recommended_temps, recommended_top_p, recommended_freq_penalty = (
+        agent.get_recommended_params(prompt)
+    )
+    prompt_type, _ = PromptAnalyzer.analyze_prompt(prompt)
+
+    # If no parameters provided, use recommended ones
+    if not temperature_string.strip():
+        temperature_string = ", ".join(map(str, recommended_temps))
+    if top_p is None:
+        top_p = recommended_top_p
+    if frequency_penalty is None:
+        frequency_penalty = recommended_freq_penalty
+
     output = agent.run(
         prompt,
         temperature_string,
         top_p=float(top_p),
         frequency_penalty=float(frequency_penalty),
     )
-    return output, agent.model_version
+
+    # Add prompt type info to output
+    output_with_type = f"Detected Prompt Type: {prompt_type}\n\n{output}"
+    return output_with_type, agent.model_version
 
 
 # Gradio interface setup
@@ -247,111 +433,105 @@ def main():
         fn=run_autotemp,
         inputs=[
             gr.Textbox(label="Prompt"),
-            gr.Textbox(label="Temperature String"),
+            gr.Textbox(
+                label="Temperature String (leave empty for auto-recommended temperatures)",
+                placeholder="e.g., 0.4, 0.6, 0.8 or leave empty for automatic selection",
+            ),
             gr.Slider(
-                minimum=0.0, maximum=1.0, step=0.1, value=1.0, label="Top-p value"
+                minimum=0.0,
+                maximum=1.0,
+                step=0.1,
+                value=None,
+                label="Top-p value (leave at 0 for auto-recommended value)",
             ),
             gr.Slider(
                 minimum=-2.0,
                 maximum=2.0,
                 step=0.1,
-                value=0.0,
-                label="Frequency Penalty",
+                value=None,
+                label="Frequency Penalty (leave at 0 for auto-recommended value)",
             ),
-            gr.Checkbox(label="Auto Select"),
+            gr.Checkbox(label="Auto Select Best Output"),
         ],
         outputs=[
             "text",
             "text",
-        ],  # Two outputs: one for the result, one for model_version
-        title="AutoTemp: Enhanced LLM Responses with Temperature and Top-p Tuning",
-        description="""AutoTemp generates responses at different temperatures, evaluates them, and ranks them based on quality. 
-                       Enter temperatures separated by commas for evaluation.
-                       Adjust 'Top-p' to control output diversity: lower for precision, higher for creativity.
-                       Toggle 'Auto Select' to either see the top-rated output or all evaluated outputs.
-                       Check the FAQs at the bottom of the page for more info.""",
-        article="""**FAQs**
+        ],
+        title="AutoTemp: Enhanced LLM Responses with Smart Parameter Tuning",
+        description="""AutoTemp now automatically detects your prompt type and recommends optimal parameters!
+                      You can either use the recommended parameters by leaving fields empty, or override them with your own values.
+                      The system learns from successful outputs to improve recommendations over time.""",
+        article="""**How it works**
 
-**What's Top-p?** 'Top-p' controls the diversity of AI responses: a low 'top-p' makes output more focused and predictable, while a high 'top-p' encourages variety and surprise. Pair with temperature to fine-tune AI creativity: higher temperatures with high 'top-p' for bold ideas, or lower temperatures with low 'top-p' for precise answers. 
-Using top_p=0 essentially disables the "nucleus sampling" feature, where only the most probable tokens are considered. This is equivalent to using full softmax probability distribution to sample the next word.
+1. **Prompt Type Detection**: AutoTemp analyzes your prompt to determine its type (e.g., creative writing, technical explanation, business formal, brainstorming).
+2. **Smart Parameter Recommendations**: Based on the prompt type and historical performance, it suggests optimal temperature ranges and other parameters.
+3. **Learning from Success**: The system tracks which parameter combinations work best for different types of prompts and improves its recommendations over time.
 
-**How Does Temperature Affect AI Outputs?** Temperature controls the randomness of word selection. Lower temperatures lead to more predictable text, while higher temperatures allow for more novel text generation.
+**Parameter Guidelines**
 
-**How Does Top-p Influence Temperature Settings in AI Language Models?**
-Top-p and temperature are both parameters that control the randomness of AI-generated text, but they influence outcomes in subtly different ways:
+- **Temperature**: Controls randomness in the output
+  - Lower (0.1-0.5): More focused and deterministic
+  - Medium (0.6-0.9): Balanced creativity and coherence
+  - Higher (1.0+): More creative and experimental
 
-- **Low Temperatures (0.0 - 0.5):**
-  - *Effect of Top-p:* A high `top_p` value will have minimal impact, as the model's output is already quite deterministic. A low `top_p` will further constrain the model, leading to very predictable outputs.
-  - *Use Cases:* Ideal for tasks requiring precise, factual responses like technical explanations or legal advice. For example, explaining a scientific concept or drafting a formal business email.
+- **Top-p**: Controls token selection diversity
+  - Lower (0.1-0.5): Very focused on most likely tokens
+  - Medium (0.6-0.8): Balanced selection
+  - Higher (0.9-1.0): Considers more diverse token options
 
-- **Medium Temperatures (0.5 - 0.7):**
-  - *Effect of Top-p:* `top_p` starts to influence the variety of the output. A higher `top_p` will introduce more diversity without sacrificing coherence.
-  - *Use Cases:* Suitable for creative yet controlled content, such as writing an article on a current event or generating a business report that balances creativity with professionalism.
+- **Frequency Penalty**: Controls repetition
+  - Negative: May allow more repetition
+  - Zero: Neutral
+  - Positive: Encourages more diverse vocabulary
 
-- **High Temperatures (0.8 - 1.0):**
-  - *Effect of Top-p:* A high `top_p` is crucial for introducing creativity and surprise, but may result in less coherent outputs. A lower `top_p` can help maintain some coherence.
-  - *Use Cases:* Good for brainstorming sessions, generating creative writing prompts, or coming up with out-of-the-box ideas where a mix of novelty and relevance is appreciated.
+**Prompt Types and Typical Parameters**
 
-- **Extra-High Temperatures (1.1 - 2.0):**
-  - *Effect of Top-p:* The output becomes more experimental and unpredictable, and `top_p`'s influence can vary widely. It's a balance between randomness and diversity.
-  - *Use Cases:* Best for when you're seeking highly creative or abstract ideas, such as imagining a sci-fi scenario or coming up with a plot for a fantasy story, where coherence is less of a priority compared to novelty and uniqueness.
+1. **Creative Writing**
+   - Higher temperatures (0.7-1.3)
+   - Higher top-p (0.9)
+   - Moderate frequency penalty (0.3)
 
-Adjusting both temperature and top-p helps tailor the AI's output to your specific needs.""",
+2. **Technical Explanation**
+   - Lower temperatures (0.3-0.7)
+   - Medium top-p (0.7)
+   - Low frequency penalty (0.0)
+
+3. **Business Formal**
+   - Medium temperatures (0.4-0.8)
+   - Medium-high top-p (0.8)
+   - Low frequency penalty (0.1)
+
+4. **Brainstorming**
+   - Higher temperatures (0.8-1.4)
+   - Maximum top-p (1.0)
+   - High frequency penalty (0.5)""",
         examples=[
             [
                 "Write a short story about AGI learning to love",
-                "0.5, 0.7, 0.9, 1.1",
-                1.0,
-                0.0,
+                "",  # Empty for auto temperature
+                None,  # None for auto top-p
+                None,  # None for auto frequency penalty
                 False,
-            ],
-            [
-                "Create a dialogue between a chef and an alien creating an innovative new recipe",
-                "0.3, 0.6, 0.9, 1.2",
-                0.9,
-                0.0,
-                True,
             ],
             [
                 "Explain quantum computing to a 5-year-old",
-                "0.4, 0.8, 1.2, 1.5",
-                0.8,
-                0.0,
-                False,
-            ],
-            [
-                "Draft an email to a hotel asking for a special arrangement for a marriage proposal",
-                "0.4, 0.7, 1.0, 1.3",
-                0.7,
-                0.0,
+                "",
+                None,
+                None,
                 True,
             ],
             [
-                "Describe a futuristic city powered by renewable energy",
-                "0.5, 0.75, 1.0, 1.25",
-                0.6,
-                0.0,
-                False,
-            ],
-            [
-                "Generate a poem about the ocean's depths in the style of Edgar Allan Poe",
-                "0.6, 0.8, 1.0, 1.2",
-                0.5,
-                0.0,
+                "Draft a professional email requesting a meeting with the CEO",
+                "",
+                None,
+                None,
                 True,
             ],
             [
-                "What are some innovative startup ideas for improving urban transportation?",
-                "0.45, 0.65, 0.85, 1.05",
-                0.4,
-                0.0,
-                False,
-            ],
-            [
-                "Explain cybersecurity to a 5-year-old who has never used a computer before",
-                "0.00, 0.25, 0.5, 0.75, 1.0, 1.25, 1.5",
-                1.0,
-                0.0,
+                "Generate innovative ideas for solving climate change",
+                "",
+                None,
+                None,
                 False,
             ],
         ],
